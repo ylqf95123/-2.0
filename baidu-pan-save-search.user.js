@@ -8,8 +8,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_notification
-// @grant        GM_xmlhttpRequest
-// @connect      127.0.0.1
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -30,7 +28,6 @@
     refreshDelayMs: 120,
     nodeSearchAttempts: 8,
     pathVerifyAttempts: 12,
-    debugReportEnabled: true,
   };
 
   const SELECTORS = {
@@ -89,11 +86,6 @@
       '[class*="caret"]',
       '[role="button"]',
     ],
-    pathTrigger: [
-      ".bottom-save-path-icon",
-      ".bottom-save-path-wrap",
-      ".bottom-save-path",
-    ],
     pathIndicator: [
       ".bottom-save-path",
       '[class*="save-path"]',
@@ -106,7 +98,6 @@
   const state = {
     observer: null,
     styleReady: false,
-    dialogKey: "",
     indexPromise: null,
     cachedFolders: null,
     searchTimer: 0,
@@ -114,54 +105,6 @@
     progressListeners: new Set(),
     lastProgress: null,
   };
-
-  const DEBUG_CONFIG = {
-    serverUrl: "http://127.0.0.1:7777/event",
-    sessionId: "locate-folder-fail",
-    runId: "pre-fix",
-  };
-
-  // #region debug-point report-helper
-  function reportDebug(hypothesisId, event, payload, locationLabel) {
-    if (!CONFIG.debugReportEnabled) {
-      return;
-    }
-
-    const body = JSON.stringify({
-      sessionId: DEBUG_CONFIG.sessionId,
-      runId: DEBUG_CONFIG.runId,
-      hypothesisId,
-      location: locationLabel || "baidu-pan-save-search.user.js",
-      msg: `[DEBUG] ${event}`,
-      data: {
-        url: location.href,
-        ...payload,
-      },
-      ts: Date.now(),
-    });
-
-    try {
-      if (typeof GM_xmlhttpRequest === "function") {
-        GM_xmlhttpRequest({
-          method: "POST",
-          url: DEBUG_CONFIG.serverUrl,
-          headers: { "Content-Type": "application/json" },
-          data: body,
-        });
-        return;
-      }
-    } catch (_error) {}
-
-    try {
-      fetch(DEBUG_CONFIG.serverUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        mode: "cors",
-      }).catch(() => {});
-    } catch (_error) {}
-  }
-  // #endregion
 
   function emitProgress(progress) {
     state.lastProgress = progress;
@@ -206,17 +149,11 @@
   function scanDialogs() {
     const dialog = findSaveDialog();
     if (!dialog) {
-      state.dialogKey = "";
       return;
     }
-
-    const dialogKey = createDialogKey(dialog);
     if (dialog.querySelector(".yt-pan-search-root")) {
-      state.dialogKey = dialogKey;
       return;
     }
-
-    state.dialogKey = dialogKey;
     injectSearchUI(dialog);
   }
 
@@ -298,6 +235,18 @@
     let lastRenderQuery = "";
     let isComposing = false;
 
+    const scheduleSearchRender = (query) => {
+      clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(async () => {
+        const folders = await loadFolderIndex(false);
+        lastRenderQuery = query;
+        renderResults(query, folders, results, status, dialog);
+        if (input.value !== query) {
+          input.value = query;
+        }
+      }, CONFIG.debounceMs);
+    };
+
     input.addEventListener("compositionstart", () => {
       isComposing = true;
       clearTimeout(state.searchTimer);
@@ -307,51 +256,20 @@
       isComposing = false;
       const query = event.target.value;
       lastQuery = query;
-      console.log("[baidupan-search] 中文输入确认，值:", query);
-      clearTimeout(state.searchTimer);
-      state.searchTimer = window.setTimeout(async () => {
-        console.log("[baidupan-search] 开始搜索，query:", query);
-        const folders = await loadFolderIndex(false);
-        console.log("[baidupan-search] 索引数据:", folders.length, "个目录");
-        lastRenderQuery = query;
-        renderResults(query, folders, results, status, dialog);
-        // 搜索完成后立即恢复输入框的值
-        window.setTimeout(() => {
-          if (input.value !== query) {
-            console.log("[baidupan-search] 搜索后恢复输入框:", query);
-            input.value = query;
-          }
-        }, 0);
-      }, CONFIG.debounceMs);
+      scheduleSearchRender(query);
     });
 
     input.addEventListener("input", (event) => {
       if (event.isComposing || isComposing) {
-        console.log("[baidupan-search] 跳过输入法中间状态");
         return;
       }
 
-      clearTimeout(state.searchTimer);
       const query = event.target.value;
       lastQuery = query;
-      console.log("[baidupan-search] input 事件触发，当前值:", query);
-      state.searchTimer = window.setTimeout(async () => {
-        console.log("[baidupan-search] 开始搜索，query:", query);
-        const folders = await loadFolderIndex(false);
-        console.log("[baidupan-search] 索引数据:", folders.length, "个目录");
-        lastRenderQuery = query;
-        renderResults(query, folders, results, status, dialog);
-        // 搜索完成后立即恢复输入框的值
-        window.setTimeout(() => {
-          if (input.value !== query) {
-            console.log("[baidupan-search] 搜索后恢复输入框:", query);
-            input.value = query;
-          }
-        }, 0);
-      }, CONFIG.debounceMs);
+      scheduleSearchRender(query);
     });
 
-    // 防止百度脚本在结果刷新时意外清空输入框。
+    // 百度弹窗刷新时可能重置输入框，这里持续兜底恢复。
     const keepAliveTimer = window.setInterval(() => {
       if (!document.body.contains(input)) {
         window.clearInterval(keepAliveTimer);
@@ -361,7 +279,6 @@
         return;
       }
       if (lastQuery && input.value !== lastQuery) {
-        console.log("[baidupan-search] 检测到输入框被清空，恢复为:", lastQuery);
         input.value = lastQuery;
         input.style.color = "#1f2d3d";
         input.style.webkitTextFillColor = "#1f2d3d";
@@ -380,7 +297,6 @@
         return;
       }
       if (input.value !== lastQuery && lastQuery) {
-        console.log("[baidupan-search] MutationObserver 检测到输入框变化，恢复");
         input.value = lastQuery;
       }
     });
@@ -458,18 +374,6 @@
     state.indexPromise = buildFolderIndex().then(async (folders) => {
       state.cachedFolders = folders;
       await writeIndexCache(folders);
-
-      // 调试:索引完成后检查是否有"济公"
-      const matches = folders.filter(f => f.name.includes("济公") || f.path.includes("济公"));
-      console.log(
-        "[baidupan-search] 索引完成,共",
-        folders.length,
-        '个目录，包含"济公"的有:',
-        matches.length,
-        "个",
-        matches.slice(0, 5)
-      );
-
       return folders;
     }).finally(() => {
       state.indexPromise = null;
@@ -568,18 +472,6 @@
 
       const list = Array.isArray(payload.list) ? payload.list : [];
 
-      // 调试:根目录的结果打印前 10 条
-      if (dirPath === "/" && page === 1 && list.length > 0) {
-        console.log(
-          "[baidupan-search] 根目录前 10 条:",
-          list.slice(0, 10).map(item => ({
-            name: item.server_filename,
-            path: item.path,
-            isdir: item.isdir,
-          }))
-        );
-      }
-
       for (const item of list) {
         if (!item || Number(item.isdir) !== 1) {
           continue;
@@ -630,12 +522,7 @@
 
   function renderResults(query, folders, container, status, dialog) {
     const recentPaths = readRecentSelections();
-    console.log("[baidupan-search] renderResults 调用 - query:", query, "folders:", folders.length);
     const items = searchFolders(query, folders, recentPaths);
-    console.log("[baidupan-search] 搜索结果:", items.length, "条");
-    if (items.length > 0) {
-      console.log("[baidupan-search] 前 3 条结果:", items.slice(0, 3));
-    }
 
     const rootElement = container.closest(".yt-pan-search-root");
     if (rootElement) {
@@ -704,8 +591,6 @@
     const normalizedQuery = sanitize(query).toLowerCase();
     const recentSet = new Set(recentPaths);
 
-    console.log("[baidupan-search] searchFolders - 原始query:", query, "归一化query:", normalizedQuery);
-
     if (!normalizedQuery) {
       return [];
     }
@@ -743,16 +628,6 @@
   async function navigateDialogToPath(dialog, targetPath) {
     const normalizedTargetPath = normalizePath(targetPath);
     const segments = normalizedTargetPath.split("/").filter(Boolean);
-    console.log(`[baidupan-search] ========== 开始导航 ==========`);
-    console.log(`[baidupan-search] 目标路径: ${normalizedTargetPath}`);
-    console.log(`[baidupan-search] 路径分段: ${segments.join(" → ")}`);
-    // #region debug-point nav-start
-    reportDebug("A", "navigate_start", {
-      targetPath: normalizedTargetPath,
-      segments,
-      pathTexts: getDialogPathTexts(dialog),
-    }, "navigateDialogToPath:start");
-    // #endregion
 
     if (!segments.length) {
       return;
@@ -767,29 +642,11 @@
       const expectedPath = `/${segments.slice(0, index + 1).join("/")}`;
       const nextSegment = !isLast ? segments[index + 1] : null;
 
-      console.log(`[baidupan-search] -------- 第 ${index + 1}/${segments.length} 段 --------`);
-      console.log(`[baidupan-search] 查找: "${segment}"`);
-
       const node = await findNodeInDialog(dialog, segment);
 
       if (!node) {
-        console.error(`[baidupan-search] ✗✗✗ 未找到节点: "${segment}"`);
         throw new Error(`未找到目录节点：${segment}`);
       }
-
-      console.log(`[baidupan-search] ✓ 找到节点: "${segment}"`);
-      // #region debug-point nav-node-found
-      reportDebug("D", "segment_node_found", {
-        segment,
-        expectedPath,
-        isLast,
-        nextSegment,
-        nodeName: extractNodeName(node),
-        nodeText: sanitize(node.textContent || "").slice(0, 200),
-        nodeTag: node.tagName,
-        nodeClass: node.className || "",
-      }, "navigateDialogToPath:node-found");
-      // #endregion
 
       node.scrollIntoView({ block: "center" });
       await wait(200);
@@ -801,90 +658,48 @@
       });
 
       if (!activated) {
-        console.error(`[baidupan-search] ✗✗✗ 无法激活节点: "${segment}"`);
         throw new Error(`无法激活节点：${segment}`);
       }
-
-      console.log(`[baidupan-search] ✓ 第 ${index + 1} 段完成`);
     }
-
-    console.log(`[baidupan-search] ========== ✓✓✓ 导航完成 ==========`);
-  }
-
-  function findTreeContainer(dialog) {
-    const body = findFirst(dialog, SELECTORS.body) || dialog;
-    return findFirst(body, SELECTORS.treeContainer) || body;
   }
 
   async function resetDialogToRoot(dialog) {
-    console.log("[baidupan-search] 尝试重置到根目录");
-
-    // 策略1: 查找"全部文件"等文本节点
+    // 先尝试通过根节点文本或面包屑回到顶层。
     const rootTexts = ["全部文件", "我的网盘", "根目录", "全部"];
     for (const text of rootTexts) {
       const rootAnchor = findVisibleTextNode(dialog, text);
       if (rootAnchor) {
         const clickable = findClickableTarget(rootAnchor);
         if (clickable) {
-          // #region debug-point reset-hit-text
-          reportDebug("D", "reset_hit_text", {
-            rootText: text,
-            clickableTag: clickable.tagName,
-            clickableClass: clickable.className || "",
-          }, "resetDialogToRoot:text-hit");
-          // #endregion
           clickable.scrollIntoView({ block: "center" });
           dispatchClick(clickable);
           await wait(400);
-          console.log("[baidupan-search] 通过文本节点重置到根:", text);
           return true;
         }
       }
     }
 
-    // 策略2: 查找面包屑或路径指示器中的根节点
     const breadcrumbs = dialog.querySelectorAll('[class*="breadcrumb"], [class*="path"], [class*="crumb"]');
     for (const breadcrumb of breadcrumbs) {
       if (!isVisible(breadcrumb)) continue;
       const firstItem = breadcrumb.querySelector('a, span, button, [class*="item"]');
       if (firstItem && isVisible(firstItem)) {
-        // #region debug-point reset-hit-breadcrumb
-        reportDebug("D", "reset_hit_breadcrumb", {
-          breadcrumbClass: breadcrumb.className || "",
-          firstItemText: sanitize(firstItem.textContent || ""),
-        }, "resetDialogToRoot:breadcrumb-hit");
-        // #endregion
         dispatchClick(firstItem);
         await wait(400);
-        console.log("[baidupan-search] 通过面包屑重置到根");
         return true;
       }
     }
 
-    // 策略3: 尝试点击对话框中第一个可见的目录树容器
     const treeContainers = queryAll(SELECTORS.treeContainer, dialog);
     for (const container of treeContainers) {
       if (!isVisible(container)) continue;
-      // 滚动到顶部
       if (container instanceof HTMLElement) {
         container.scrollTop = 0;
         await wait(200);
-        console.log("[baidupan-search] 将目录树容器滚动到顶部");
         return true;
       }
     }
 
-    console.log("[baidupan-search] 无法明确重置到根节点，继续尝试查找");
-    // #region debug-point reset-miss
-    reportDebug("D", "reset_miss", {
-      visibleTexts: uniqueStrings(
-        Array.from(dialog.querySelectorAll("*"))
-          .filter((el) => el instanceof HTMLElement && isVisible(el))
-          .map((el) => sanitize(el.textContent || ""))
-          .filter((text) => text && text.length <= 40)
-      ).slice(0, 25),
-    }, "resetDialogToRoot:miss");
-    // #endregion
     return false;
   }
 
@@ -893,13 +708,6 @@
     if (!roots.length) {
       throw new Error("没有找到目录树容器");
     }
-    // #region debug-point find-node-roots
-    reportDebug("E", "find_node_roots", {
-      segment,
-      roots: summarizeRoots(roots),
-      pathTexts: getDialogPathTexts(dialog),
-    }, "findNodeInDialog:roots");
-    // #endregion
 
     for (const root of roots) {
       if (root instanceof HTMLElement) {
@@ -918,53 +726,15 @@
         visibleNodes.push(...nodes);
         const matched = findBestMatchingNode(nodes, segment);
         if (matched) {
-          console.log(`[baidupan-search] ✓ 找到节点 "${segment}" (第${attempt + 1}次尝试)`);
           return matched;
         }
       }
 
-      // 只在第一次和最后一次打印日志
-      if (attempt === 0 || attempt === CONFIG.nodeSearchAttempts - 1) {
-        const preview = uniqueStrings(
-          visibleNodes.map((node) => extractNodeName(node)).filter(Boolean)
-        ).slice(0, 8);
-        const segmentHints = uniqueStrings(
-          visibleNodes
-            .map((node) => getNodeTextCandidates(node))
-            .flat()
-            .filter((text) => text && text.includes(segment))
-        ).slice(0, 6);
-        // #region debug-point find-node-preview
-        reportDebug("E", "find_node_preview", {
-          segment,
-          attempt: attempt + 1,
-          visibleNodeCount: visibleNodes.length,
-          preview,
-          segmentHints,
-        }, "findNodeInDialog:preview");
-        // #endregion
-        console.log(`[baidupan-search] 查找 "${segment}" 第${attempt + 1}次: 可见${visibleNodes.length}个节点, 样例:`, preview);
-      }
-
-      // 滚动策略
       freshRoots.forEach(scrollTree);
       await wait(180);
     }
 
-    console.error(`[baidupan-search] ✗ 未找到节点 "${segment}"`);
     return null;
-  }
-
-  // 获取元素自己的文本内容（不包括子元素）
-  function getOwnText(element) {
-    if (!(element instanceof HTMLElement)) return "";
-    let text = "";
-    for (const node of element.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        text += node.textContent || "";
-      }
-    }
-    return sanitize(text);
   }
 
   function getTreeSearchRoots(dialog) {
@@ -1005,12 +775,10 @@
         continue;
       }
 
-      // 精确匹配
       if (candidate === normalizedSegment) {
         return true;
       }
 
-      // 去除多余空格后再匹配
       const trimmedCandidate = candidate.replace(/\s+/g, '');
       const trimmedSegment = normalizedSegment.replace(/\s+/g, '');
       if (trimmedCandidate === trimmedSegment) {
@@ -1021,14 +789,12 @@
         continue;
       }
 
-      // 宽松匹配
       if (candidate.startsWith(`${normalizedSegment} `) ||
           candidate.endsWith(` ${normalizedSegment}`) ||
           candidate.includes(normalizedSegment)) {
         return true;
       }
 
-      // 包含匹配（忽略空格）
       if (trimmedCandidate.includes(trimmedSegment)) {
         return true;
       }
@@ -1053,33 +819,19 @@
 
   async function waitForDialogPath(dialog, expectedPath, nextSegment) {
     for (let attempt = 0; attempt < CONFIG.pathVerifyAttempts; attempt += 1) {
-      const pathTexts = getDialogPathTexts(dialog);
       const pathMatched = dialogShowsPath(dialog, expectedPath);
       const nextVisible = nextSegment ? dialogCanSeeSegment(dialog, nextSegment) : false;
-      // #region debug-point wait-path-attempt
-      reportDebug(pathMatched ? "C" : "A", "wait_path_attempt", {
-        expectedPath,
-        nextSegment,
-        attempt: attempt + 1,
-        pathMatched,
-        nextVisible,
-        pathTexts,
-      }, "waitForDialogPath:attempt");
-      // #endregion
       if (pathMatched) {
-        console.log(`[baidupan-search] ✓ 路径验证成功: ${expectedPath}`);
         return true;
       }
 
       if (nextSegment && nextVisible) {
-        console.log(`[baidupan-search] ✓ 下一级节点可见: ${nextSegment}`);
         return true;
       }
 
       await wait(200);
     }
 
-    console.log(`[baidupan-search] ⚠ 路径验证超时: ${expectedPath}`);
     return false;
   }
 
@@ -1090,41 +842,11 @@
       node,
     ]);
 
-    console.log(`[baidupan-search] 激活节点，尝试 ${targets.length} 个目标`);
-    // #region debug-point activate-start
-    reportDebug("D", "activate_start", {
-      expectedPath: options.expectedPath,
-      nextSegment: options.nextSegment,
-      isLast: options.isLast,
-      nodeName: extractNodeName(node),
-      targets: targets.map((target) => ({
-        tag: target.tagName,
-        className: target.className || "",
-        text: sanitize(target.textContent || "").slice(0, 80),
-      })),
-    }, "activateNodeInDialog:start");
-    // #endregion
-
     for (let index = 0; index < targets.length; index += 1) {
       const target = targets[index];
       const actionTarget = options.isLast
         ? (findNodeActionTarget(target) || target)
         : (findNodeExpandTarget(target) || findNodeExpandTarget(node) || target);
-      // #region debug-point activate-target
-      reportDebug("D", "activate_target_attempt", {
-        expectedPath: options.expectedPath,
-        nextSegment: options.nextSegment,
-        isLast: options.isLast,
-        targetIndex: index + 1,
-        targetTag: target.tagName,
-        targetClass: target.className || "",
-        targetText: sanitize(target.textContent || "").slice(0, 80),
-        actionTargetTag: actionTarget.tagName,
-        actionTargetClass: actionTarget.className || "",
-        actionTargetText: sanitize(actionTarget.textContent || "").slice(0, 80),
-        pathTextsBeforeClick: getDialogPathTexts(dialog),
-      }, "activateNodeInDialog:target-attempt");
-      // #endregion
       actionTarget.scrollIntoView({ block: "center" });
       await wait(150);
       if (options.isLast) {
@@ -1133,55 +855,32 @@
         dispatchSingleClick(actionTarget);
       }
       await wait(300);
-      // #region debug-point activate-after-click
-      reportDebug("C", "activate_after_click", {
-        expectedPath: options.expectedPath,
-        nextSegment: options.nextSegment,
-        isLast: options.isLast,
-        targetIndex: index + 1,
-        ariaExpanded: node.getAttribute("aria-expanded") || "",
-        ariaSelected: node.getAttribute("aria-selected") || "",
-        nodeClass: node.className || "",
-        actionTargetTag: actionTarget.tagName,
-        actionTargetClass: actionTarget.className || "",
-        pathTextsAfterClick: getDialogPathTexts(dialog),
-        nextVisibleAfterClick: options.nextSegment ? dialogCanSeeSegment(dialog, options.nextSegment) : false,
-      }, "activateNodeInDialog:after-click");
-      // #endregion
 
       if (!options.isLast) {
-        // 非最后一个节点，需要展开
-        console.log("[baidupan-search] 检查路径是否切换...");
         if (await waitForDialogPath(dialog, options.expectedPath, options.nextSegment)) {
-          console.log("[baidupan-search] ✓ 路径已切换");
           return true;
         }
 
-        console.log("[baidupan-search] 展开节点并等待子节点加载...");
         expandNode(actionTarget);
         await wait(450);
 
         if (await waitForDialogPath(dialog, options.expectedPath, options.nextSegment)) {
-          console.log("[baidupan-search] ✓ 展开后路径已切换");
           return true;
         }
         continue;
       }
 
-      // 最后一个节点，多次点击确保选中
-      console.log("[baidupan-search] 最后节点，二次点击确保选中");
+      // 最后一级补点两次，提升选中稳定性。
       clickNode(target);
       await wait(300);
       clickNode(target);
       await wait(300);
 
       if (await waitForDialogPath(dialog, options.expectedPath, "")) {
-        console.log("[baidupan-search] ✓ 最终节点已选中");
         return true;
       }
     }
 
-    console.error("[baidupan-search] ✗ 所有目标都未能激活节点");
     return false;
   }
 
@@ -1190,52 +889,18 @@
       return;
     }
 
-    console.log("[baidupan-search] 尝试展开节点");
-
-    // 检查是否已经展开
     const expanded = node.getAttribute("aria-expanded");
     if (expanded === "true") {
-      console.log("[baidupan-search] 节点已展开，跳过");
       return;
     }
 
     const expander = findNodeExpandTarget(node);
     if (!expander) {
-      // #region debug-point expand-miss
-      reportDebug("C", "expand_control_missing", {
-        nodeName: extractNodeName(node),
-        nodeTag: node.tagName,
-        nodeClass: node.className || "",
-        nodeText: sanitize(node.textContent || "").slice(0, 200),
-      }, "expandNode:miss");
-      // #endregion
       return;
     }
 
-    // #region debug-point expand-start
-    reportDebug("C", "expand_start", {
-      nodeName: extractNodeName(node),
-      nodeClass: node.className || "",
-      ariaExpandedBefore: expanded || "",
-      expanderTag: expander.tagName,
-      expanderClass: expander.className || "",
-      expanderText: sanitize(expander.textContent || "").slice(0, 120),
-    }, "expandNode:start");
-    // #endregion
-
     expander.scrollIntoView({ block: "center" });
     dispatchSingleClick(expander);
-
-    window.setTimeout(() => {
-      // #region debug-point expand-after
-      reportDebug("C", "expand_after", {
-        nodeName: extractNodeName(node),
-        nodeClass: node.className || "",
-        ariaExpandedAfter: node.getAttribute("aria-expanded") || "",
-        nodeTextAfter: sanitize(node.textContent || "").slice(0, 220),
-      }, "expandNode:after");
-      // #endregion
-    }, 220);
   }
 
   function clickNode(node) {
@@ -1280,19 +945,16 @@
       return "";
     }
 
-    // 优先使用 title 属性
     const title = sanitize(node.getAttribute("title") || "");
     if (title) {
       return title;
     }
 
-    // 尝试 data-name
     const dataName = sanitize(node.getAttribute("data-name") || "");
     if (dataName) {
       return dataName;
     }
 
-    // 查找标签元素
     const label = findFirst(node, SELECTORS.nodeLabel);
     if (label) {
       const labelText = sanitize(label.textContent || "");
@@ -1301,7 +963,6 @@
       }
     }
 
-    // 尝试直接获取节点文本，但排除子节点过多的情况
     const directText = sanitize(node.textContent || "");
     if (directText && directText.length < 200 && node.children.length < 10) {
       return directText;
@@ -1403,31 +1064,24 @@
 
   function dialogShowsPath(dialog, expectedPath) {
     const cleanedPath = normalizePath(expectedPath).replace(/\s+/g, "");
-    console.log(`[baidupan-search] 验证路径: ${cleanedPath}`);
 
     if (cleanedPath === "/") {
       return true;
     }
 
-    // 获取对话框中的所有路径文本
     const pathTexts = getDialogPathTexts(dialog);
-    console.log(`[baidupan-search] 对话框路径文本:`, pathTexts);
 
-    // 检查是否包含完整路径
     const hasFullPath = pathTexts.some((text) => {
       const cleanedText = sanitize(text).replace(/\s+/g, "");
       return cleanedText.includes(cleanedPath);
     });
 
     if (hasFullPath) {
-      console.log(`[baidupan-search] ✓ 找到完整路径`);
       return true;
     }
 
-    // 检查是否所有段落都出现（不需要连续）
     const segments = cleanedPath.split("/").filter(Boolean);
     const lastSegment = segments[segments.length - 1];
-    console.log(`[baidupan-search] 检查最后段: ${lastSegment}`);
 
     const hasLastSegment = pathTexts.some((text) => {
       const cleanedText = sanitize(text).replace(/\s+/g, "");
@@ -1435,24 +1089,18 @@
     });
 
     if (hasLastSegment) {
-      console.log(`[baidupan-search] ✓ 找到最后段落: ${lastSegment}`);
       return true;
     }
 
-    // 检查是否有选中的节点文本匹配
     const selectedNodes = dialog.querySelectorAll('[aria-selected="true"], .selected, [class*="selected"]');
-    console.log(`[baidupan-search] 选中节点数量: ${selectedNodes.length}`);
 
     for (const node of selectedNodes) {
       const nodeText = sanitize(node.textContent || "").replace(/\s+/g, "");
-      console.log(`[baidupan-search] 选中节点文本: ${nodeText}`);
       if (nodeText.includes(lastSegment)) {
-        console.log(`[baidupan-search] ✓ 选中节点包含目标段落`);
         return true;
       }
     }
 
-    console.log(`[baidupan-search] ✗ 路径验证失败`);
     return false;
   }
 
@@ -1601,18 +1249,6 @@
       return;
     }
     container.style.display = visible ? "block" : "none";
-  }
-
-  function summarizeRoots(roots) {
-    return roots.map((root, index) => ({
-      index,
-      tag: root.tagName,
-      className: root.className || "",
-      childCount: root.childElementCount,
-      scrollHeight: root.scrollHeight,
-      clientHeight: root.clientHeight,
-      preview: sanitize(root.textContent || "").slice(0, 120),
-    }));
   }
 
   function uniqueStrings(values) {
@@ -1781,17 +1417,6 @@
       style.visibility !== "hidden" &&
       style.opacity !== "0"
     );
-  }
-
-  function createDialogKey(dialog) {
-    const rect = dialog.getBoundingClientRect();
-    return [
-      dialog.className || "",
-      Math.round(rect.left),
-      Math.round(rect.top),
-      Math.round(rect.width),
-      Math.round(rect.height),
-    ].join("|");
   }
 
   function escapeHtml(text) {
