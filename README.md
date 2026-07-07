@@ -51,7 +51,7 @@
 
 **现象**：搜得到目录，点击后提示成功，但实际路径没变。
 
-![image-20260707183001389](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20260707183001389.png)
+![问题1](./images/25.png)
 
 **原因**：只匹配到文本就认为成功，没有等待百度网盘真正切换。
 
@@ -66,7 +66,7 @@
 
 **现象**：明明目录存在，却搜不到或定位不到。
 
-![image-20260707183135688](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20260707183135688.png)
+![问题2](./images/26.png)
 
 **原因**：扫描范围太大，把整个弹窗都当成了目录树，反而漏掉了真实节点。
 
