@@ -761,6 +761,8 @@
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index];
       const isLast = index === segments.length - 1;
+      const expectedPath = `/${segments.slice(0, index + 1).join("/")}`;
+      const nextSegment = !isLast ? segments[index + 1] : null;
 
       console.log(`[baidupan-search] -------- 第 ${index + 1}/${segments.length} 段 --------`);
       console.log(`[baidupan-search] 查找: "${segment}"`);
@@ -776,8 +778,9 @@
       // #region debug-point nav-node-found
       reportDebug("D", "segment_node_found", {
         segment,
-        expectedPath: `/${segments.slice(0, index + 1).join("/")}`,
+        expectedPath,
         isLast,
+        nextSegment,
         nodeName: extractNodeName(node),
         nodeText: sanitize(node.textContent || "").slice(0, 200),
         nodeTag: node.tagName,
@@ -787,19 +790,16 @@
 
       node.scrollIntoView({ block: "center" });
       await wait(200);
-      clickNode(node);
-      await wait(300);
 
-      if (!isLast) {
-        console.log(`[baidupan-search] 展开节点...`);
-        expandNode(node);
-        await wait(500);
-      } else {
-        console.log(`[baidupan-search] 最后节点，三次点击确保选中`);
-        clickNode(node);
-        await wait(300);
-        clickNode(node);
-        await wait(500);
+      const activated = await activateNodeInDialog(dialog, node, {
+        expectedPath,
+        nextSegment,
+        isLast,
+      });
+
+      if (!activated) {
+        console.error(`[baidupan-search] ✗✗✗ 无法激活节点: "${segment}"`);
+        throw new Error(`无法激活节点：${segment}`);
       }
 
       console.log(`[baidupan-search] ✓ 第 ${index + 1} 段完成`);
@@ -1171,9 +1171,14 @@
   }
 
   function expandNode(node) {
-    const expander = findFirst(node, SELECTORS.expander);
+    // 先尝试直接找展开按钮
+    let expander = findFirst(node, SELECTORS.expander);
     if (!expander) {
-      console.log("[baidupan-search] 未找到展开按钮，尝试点击节点本身");
+      // 如果找不到，尝试在整棵树里找这个节点的展开按钮
+      expander = node.querySelector('[class*="switch"], [class*="expand"], [class*="arrow"], [class*="caret"], [role="button"]');
+    }
+    if (!expander) {
+      console.log("[baidupan-search] 未找到展开按钮，尝试点击节点本身及其子元素");
       // #region debug-point expand-miss
       reportDebug("C", "expand_control_missing", {
         nodeName: extractNodeName(node),
@@ -1182,6 +1187,10 @@
         nodeText: sanitize(node.textContent || "").slice(0, 200),
       }, "expandNode:miss");
       // #endregion
+      // 实在找不到，尝试多点几次节点本身
+      dispatchClick(node);
+      setTimeout(() => dispatchClick(node), 100);
+      setTimeout(() => dispatchClick(node), 200);
       return;
     }
 
@@ -1210,15 +1219,24 @@
       expanderText: sanitize(expander.textContent || "").slice(0, 120),
     }, "expandNode:start");
     // #endregion
-    expander.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    expander.click();
 
-    // 强制触发多次点击确保展开
+    // 激进地尝试展开：发多个不同类型的事件，多点几次
+    expander.scrollIntoView({ block: "center" });
+    dispatchClick(expander);
+    expander.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    setTimeout(() => {
+      expander.click();
+    }, 100);
+    setTimeout(() => {
+      dispatchClick(expander);
+    }, 200);
     setTimeout(() => {
       if (node.getAttribute("aria-expanded") !== "true") {
-        expander.click();
+        // 如果还是没展开，试试连节点一起点
+        dispatchClick(node);
       }
-    }, 100);
+    }, 400);
+
     window.setTimeout(() => {
       // #region debug-point expand-after
       reportDebug("C", "expand_after", {
@@ -1228,7 +1246,7 @@
         nodeTextAfter: sanitize(node.textContent || "").slice(0, 220),
       }, "expandNode:after");
       // #endregion
-    }, 220);
+    }, 600);
   }
 
   function clickNode(node) {
