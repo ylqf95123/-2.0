@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘转存目录搜索
 // @namespace    https://github.com/chajian/baidu-pan-save-search
-// @version      0.4.1
+// @version      0.5.0
 // @description  在百度网盘分享页的保存到网盘弹窗中搜索自己的目录并跳转定位
 // @match        https://pan.baidu.com/s/*
 // @match        https://pan.baidu.com/share/*
@@ -80,6 +80,9 @@
       "span",
     ],
     expander: [
+      '.plus-icon-operate',
+      '.em-b-in-blk.plus-icon-operate',
+      '[class*="plus-icon"]',
       '[class*="switch"]',
       '[class*="expand"]',
       '[class*="arrow"]',
@@ -1104,6 +1107,9 @@
 
     for (let index = 0; index < targets.length; index += 1) {
       const target = targets[index];
+      const actionTarget = options.isLast
+        ? (findNodeActionTarget(target) || target)
+        : (findNodeExpandTarget(target) || findNodeExpandTarget(node) || target);
       // #region debug-point activate-target
       reportDebug("D", "activate_target_attempt", {
         expectedPath: options.expectedPath,
@@ -1113,12 +1119,19 @@
         targetTag: target.tagName,
         targetClass: target.className || "",
         targetText: sanitize(target.textContent || "").slice(0, 80),
+        actionTargetTag: actionTarget.tagName,
+        actionTargetClass: actionTarget.className || "",
+        actionTargetText: sanitize(actionTarget.textContent || "").slice(0, 80),
         pathTextsBeforeClick: getDialogPathTexts(dialog),
       }, "activateNodeInDialog:target-attempt");
       // #endregion
-      target.scrollIntoView({ block: "center" });
+      actionTarget.scrollIntoView({ block: "center" });
       await wait(150);
-      clickNode(target);
+      if (options.isLast) {
+        clickNode(actionTarget);
+      } else {
+        dispatchSingleClick(actionTarget);
+      }
       await wait(300);
       // #region debug-point activate-after-click
       reportDebug("C", "activate_after_click", {
@@ -1129,6 +1142,8 @@
         ariaExpanded: node.getAttribute("aria-expanded") || "",
         ariaSelected: node.getAttribute("aria-selected") || "",
         nodeClass: node.className || "",
+        actionTargetTag: actionTarget.tagName,
+        actionTargetClass: actionTarget.className || "",
         pathTextsAfterClick: getDialogPathTexts(dialog),
         nextVisibleAfterClick: options.nextSegment ? dialogCanSeeSegment(dialog, options.nextSegment) : false,
       }, "activateNodeInDialog:after-click");
@@ -1143,8 +1158,8 @@
         }
 
         console.log("[baidupan-search] 展开节点并等待子节点加载...");
-        expandNode(node);
-        await wait(400);
+        expandNode(actionTarget);
+        await wait(450);
 
         if (await waitForDialogPath(dialog, options.expectedPath, options.nextSegment)) {
           console.log("[baidupan-search] ✓ 展开后路径已切换");
@@ -1171,14 +1186,21 @@
   }
 
   function expandNode(node) {
-    // 先尝试直接找展开按钮
-    let expander = findFirst(node, SELECTORS.expander);
-    if (!expander) {
-      // 如果找不到，尝试在整棵树里找这个节点的展开按钮
-      expander = node.querySelector('[class*="switch"], [class*="expand"], [class*="arrow"], [class*="caret"], [role="button"]');
+    if (!(node instanceof HTMLElement)) {
+      return;
     }
+
+    console.log("[baidupan-search] 尝试展开节点");
+
+    // 检查是否已经展开
+    const expanded = node.getAttribute("aria-expanded");
+    if (expanded === "true") {
+      console.log("[baidupan-search] 节点已展开，跳过");
+      return;
+    }
+
+    const expander = findNodeExpandTarget(node);
     if (!expander) {
-      console.log("[baidupan-search] 未找到展开按钮，尝试点击节点本身及其子元素");
       // #region debug-point expand-miss
       reportDebug("C", "expand_control_missing", {
         nodeName: extractNodeName(node),
@@ -1187,28 +1209,9 @@
         nodeText: sanitize(node.textContent || "").slice(0, 200),
       }, "expandNode:miss");
       // #endregion
-      // 实在找不到，尝试多点几次节点本身
-      dispatchClick(node);
-      setTimeout(() => dispatchClick(node), 100);
-      setTimeout(() => dispatchClick(node), 200);
       return;
     }
 
-    const expanded = node.getAttribute("aria-expanded");
-    if (expanded === "true") {
-      console.log("[baidupan-search] 节点已经展开");
-      // #region debug-point expand-skip
-      reportDebug("C", "expand_skip_already_true", {
-        nodeName: extractNodeName(node),
-        nodeClass: node.className || "",
-        expanderTag: expander.tagName,
-        expanderClass: expander.className || "",
-      }, "expandNode:skip");
-      // #endregion
-      return;
-    }
-
-    console.log("[baidupan-search] 展开节点...");
     // #region debug-point expand-start
     reportDebug("C", "expand_start", {
       nodeName: extractNodeName(node),
@@ -1220,22 +1223,8 @@
     }, "expandNode:start");
     // #endregion
 
-    // 激进地尝试展开：发多个不同类型的事件，多点几次
     expander.scrollIntoView({ block: "center" });
-    dispatchClick(expander);
-    expander.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    setTimeout(() => {
-      expander.click();
-    }, 100);
-    setTimeout(() => {
-      dispatchClick(expander);
-    }, 200);
-    setTimeout(() => {
-      if (node.getAttribute("aria-expanded") !== "true") {
-        // 如果还是没展开，试试连节点一起点
-        dispatchClick(node);
-      }
-    }, 400);
+    dispatchSingleClick(expander);
 
     window.setTimeout(() => {
       // #region debug-point expand-after
@@ -1246,7 +1235,7 @@
         nodeTextAfter: sanitize(node.textContent || "").slice(0, 220),
       }, "expandNode:after");
       // #endregion
-    }, 600);
+    }, 220);
   }
 
   function clickNode(node) {
@@ -1345,6 +1334,11 @@
   function findTreeNodeCandidate(node, root) {
     if (!(node instanceof HTMLElement)) {
       return null;
+    }
+
+    const baiduTreeNode = node.closest(".treeview-node-handler, .treeview-node");
+    if (baiduTreeNode instanceof HTMLElement && root.contains(baiduTreeNode)) {
+      return baiduTreeNode;
     }
 
     const candidate = node.closest(
@@ -1503,6 +1497,28 @@
     return findDirectNodeLabel(node) || findClickableTarget(node) || findClickableTarget(findFirst(node, SELECTORS.nodeLabel)) || node;
   }
 
+  function findNodeExpandTarget(node) {
+    if (!(node instanceof HTMLElement)) {
+      return null;
+    }
+
+    if (node.matches(".treeview-node-handler, .treeview-node")) {
+      return node;
+    }
+
+    const inlineHandler = node.querySelector(".treeview-node-handler, .treeview-node");
+    if (inlineHandler instanceof HTMLElement) {
+      return inlineHandler;
+    }
+
+    const closestHandler = node.closest(".treeview-node-handler, .treeview-node");
+    if (closestHandler instanceof HTMLElement) {
+      return closestHandler;
+    }
+
+    return findDirectNodeLabel(node) || findClickableTarget(node) || node;
+  }
+
   function findDirectNodeLabel(node) {
     if (!(node instanceof HTMLElement)) {
       return null;
@@ -1547,6 +1563,23 @@
       } catch (_error) {}
     }
     ["pointerdown", "mousedown", "mouseup", "click"].forEach((type) => {
+      node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+    });
+    node.click();
+  }
+
+  function dispatchSingleClick(node) {
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+
+    if (typeof node.focus === "function") {
+      try {
+        node.focus({ preventScroll: true });
+      } catch (_error) {}
+    }
+
+    ["pointerdown", "mousedown", "mouseup"].forEach((type) => {
       node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
     });
     node.click();
