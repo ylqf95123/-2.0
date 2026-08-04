@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘转存目录搜索
 // @namespace    https://github.com/chajian/baidu-pan-save-search
-// @version      0.5.0
+// @version      0.5.1
 // @description  在百度网盘分享页的保存到网盘弹窗中搜索自己的目录并跳转定位
 // @match        https://pan.baidu.com/s/*
 // @match        https://pan.baidu.com/share/*
@@ -205,6 +205,8 @@
       dialog.insertBefore(root, dialog.firstChild);
     }
 
+    prepareDialogLayout(dialog, body);
+
     const input = root.querySelector(".yt-pan-search-input");
     const refreshBtn = root.querySelector('[data-action="refresh"]');
     const status = root.querySelector(".yt-pan-search-status");
@@ -352,6 +354,68 @@
     }).catch((error) => {
       status.textContent = `目录索引失败：${error.message}`;
     });
+  }
+
+  function prepareDialogLayout(dialog, body) {
+    if (!(dialog instanceof HTMLElement)) {
+      return;
+    }
+
+    dialog.classList.add("yt-pan-search-dialog");
+
+    const bodyLayout = getDirectDialogChild(dialog, body);
+    if (bodyLayout) {
+      bodyLayout.classList.add("yt-pan-search-dialog-body");
+    }
+
+    // Keep the native action bar as a non-shrinking flex item when the
+    // injected search panel is added to a fixed-height dialog.
+    const confirmControl = findVisibleConfirmControl(dialog);
+    const footerLayout = getDirectDialogChild(dialog, confirmControl);
+    if (footerLayout && footerLayout !== bodyLayout) {
+      footerLayout.classList.add("yt-pan-search-dialog-footer");
+    }
+  }
+
+  function getDirectDialogChild(dialog, node) {
+    if (!(dialog instanceof HTMLElement) || !(node instanceof HTMLElement)) {
+      return null;
+    }
+
+    let current = node;
+    while (current.parentElement && current.parentElement !== dialog) {
+      current = current.parentElement;
+    }
+    return current.parentElement === dialog ? current : null;
+  }
+
+  function findVisibleConfirmControl(dialog) {
+    if (!(dialog instanceof HTMLElement)) {
+      return null;
+    }
+
+    const controls = dialog.querySelectorAll(
+      'button, [role="button"], a, [class*="btn"], [class*="button"], input[type="button"], input[type="submit"]'
+    );
+    const control = Array.from(controls).find((candidate) => {
+      if (!isVisible(candidate)) {
+        return false;
+      }
+      const label = sanitize(candidate.textContent || candidate.value || "");
+      return label === "确定";
+    });
+    if (control) {
+      return control;
+    }
+
+    // Some Baidu builds put the label in a plain span inside the footer.
+    return Array.from(dialog.querySelectorAll("*")).find((candidate) => {
+      if (!isVisible(candidate)) {
+        return false;
+      }
+      const label = sanitize(candidate.textContent || "");
+      return label === "确定";
+    }) || null;
   }
 
   async function loadFolderIndex(forceRefresh) {
@@ -1446,6 +1510,23 @@
         background: #fff;
         box-shadow: 0 2px 8px rgba(17, 34, 68, 0.06);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        box-sizing: border-box;
+        flex: 0 0 auto;
+      }
+      /* Let the directory area give space back to Baidu's bottom action bar. */
+      .yt-pan-search-dialog {
+        display: flex !important;
+        flex-direction: column !important;
+        max-height: calc(100vh - 32px) !important;
+        overflow: hidden !important;
+      }
+      .yt-pan-search-dialog > .yt-pan-search-dialog-body {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+      }
+      .yt-pan-search-dialog > .yt-pan-search-dialog-footer {
+        flex: 0 0 auto !important;
+        min-height: 0 !important;
       }
       .yt-pan-search-toolbar {
         display: flex;
